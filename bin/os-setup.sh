@@ -90,7 +90,7 @@ declare -A NETCONF_TPL=(
     PREFIX={{ prefix }} # <- check prefix
     GATEWAY={{ gateway }} # <- check gateway
     ONBOOT=yes
-    DNS1={{ dns1 }} # <- probably change to sth like 192.168.0.1
+    DNS1={{ dns1 }} # <- use gateway for dns1 ({{ gateway }})?
     DNS2={{ dns2 }}
   '
   [ubu]='
@@ -111,7 +111,7 @@ declare -A NETCONF_TPL=(
    .        via: {{ gateway }} # <- check gateway
    .      nameservers:
    .        addresses:
-   .        - {{ dns1 }} # <- probably change to sth like 192.168.0.1
+   .        - {{ dns1 }} # <- use gateway for dns1 ({{ gateway }})?
    .        - {{ dns2 }}
   '
 )
@@ -144,11 +144,11 @@ declare -A NETCONF_TPL=(
   }
 
   _opt_change() {
-    [[ -n "${BASH_SOURCE[0]}" ]] || return
+    [[ -w "${0}" ]] || return
     local flag="${1}"
     local old="['\"]?${2}['\"]?"
     local new="${3}"
-    sed -i -E 's/^(\s+\['"${flag}"'\]=)'"${old}"'$/\1'"${new}"'/' "${0}"
+    (set -x; sed -i -E 's/^(\s+\['"${flag}"'\]=)'"${old}"'$/\1'"${new}"'/' "${0}")
   }
 
   opt_switch_off() {
@@ -240,6 +240,8 @@ declare -A NETCONF_TPL=(
 declare -a DEPENDENCIES
 declare -a ERRBAG
 declare -a POST_MSG
+# for debian-based system unattended installation
+export DEBIAN_FRONTEND=noninteractive
 
 # validate bools
 for c in "${!DEF[@]}"; do
@@ -289,10 +291,10 @@ install_deps() {
   local -a deps=($(printf -- '%s\n' "${DEPENDENCIES[@]}" | sort -u))
 
   if ${CONF[is_deb]}; then
-    pm_cmd=(DEBIAN_FRONTEND=noninteractive apt-get)
+    pm_cmd=(apt-get -q)
     (set -x; "${pm_cmd[0]}" update >/dev/null)
   elif ${CONF[is_rhel]}; then
-    pm_cmd=(dnf)
+    pm_cmd=(dnf -q)
   fi
 
   (set -x; "${pm_cmd[0]}" install -y "${deps[@]}" >/dev/null) \
@@ -337,10 +339,12 @@ declare USER_MK_FUNC=dummy
     id -u "${login}" > /dev/null 2>&1 && return
 
     local -a args
+    local shell=/bin/bash
     ${system} && args+=('-r')
-    args+=(-m "${login}")
+    [[ -f /usr/bin/bash ]] && shell=/usr/bin/bash
+    args+=(-s "${shell}")
 
-    ( set -x; useradd "${args[@]}" ) || return $?
+    ( set -x; useradd "${args[@]}" -m "${login}") || return $?
   }
 
   _user_mk_init() {
@@ -552,9 +556,9 @@ declare INSTALLS_FUNC=dummy
   _installs() {
     local -a pm_cmd
 
-    ${CONF[is_rhel]} && pm_cmd=(dnf)
+    ${CONF[is_rhel]} && pm_cmd=(dnf -q)
     ${CONF[is_deb]} && {
-      pm_cmd=(DEBIAN_FRONTEND=noninteractive apt-get)
+      pm_cmd=(apt-get -q)
       (set -x; "${pm_cmd[@]}" update >/dev/null)
     }
 
@@ -618,11 +622,11 @@ declare UPGRADE_FUNC=dummy
     local -a pm_cmd
 
     ${CONF[is_rhel]} && {
-      pm_cmd=(dnf)
+      pm_cmd=(dnf -q)
       (set -x; "${pm_cmd[@]}" upgrade -y >/dev/null)
     }
     ${CONF[is_deb]} && {
-      pm_cmd=(DEBIAN_FRONTEND=noninteractive apt-get)
+      pm_cmd=(apt-get -q)
       (set -x; "${pm_cmd[@]}" update >/dev/null)
       (set -x; "${pm_cmd[@]}" dist-upgrade -y >/dev/null)
     }
@@ -638,8 +642,8 @@ declare CLEANUP_FUNC=dummy
 {
   _cleanup() {
     local pm_cmd
-    ${CONF[is_deb]} && pm_cmd=(DEBIAN_FRONTEND=noninteractive apt-get)
-    ${CONF[is_rhel]} && pm_cmd=(dnf)
+    ${CONF[is_deb]} && pm_cmd=(apt-get -q)
+    ${CONF[is_rhel]} && pm_cmd=(dnf -q)
 
     (set -x; "${pm_cmd[@]}" -y autoremove >/dev/null)
     ${CONF[is_deb]} && (
