@@ -128,7 +128,7 @@ declare -A NETCONF_TPL=(
   }
 
   log_msg() {
-    print_msg "${@}" | sed 's/^/[os-setup] /'
+    print_msg "${@}" | sed 's/^/[initos] /'
   }
   log_err() { log_msg "${@}" >&2; }
 
