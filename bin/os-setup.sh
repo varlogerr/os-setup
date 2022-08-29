@@ -33,6 +33,10 @@ declare -A CONF=(
   # GP vpn
   [gp]=false
   #
+  # MISC
+  # Generate sample net config to $(pwd)
+  [netconf]=false
+  #
   # MAINTENANCE ACTIONS
   # Upgrade the system
   [upgrade]=false
@@ -53,6 +57,7 @@ declare -A DEF=(
   [hostname_ip]="127.0.1.1"
   [ansible_prereq]=false
   [gp]=false
+  [netconf]=false
   [upgrade]=false
   [cleanup]=false
   [is_deb]=false
@@ -69,6 +74,47 @@ declare -A DEF=(
 for c in "${!DEF[@]}"; do
   CONF[$c]="${CONF[$c]:-${DEF[$c]}}"
 done
+
+declare -A NETCONF_TPL=(
+  # https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/7/html/networking_guide/sec-using_networkmanager_with_sysconfig_files
+  # https://www.liquidweb.com/kb/how-to-install-and-configure-nmcli/
+  [rhel]='
+    # * review the config and modify if required
+    # * `mv ./ifcfg-{{ iface }} /etc/sysconfig/network-scripts/ifcfg-{{ iface }}`
+    # * `nmcli connection down {{ iface }}; nmcli connection up {{ iface }}`
+    TYPE=Ethernet
+    BOOTPROTO=none
+    DEVICE={{ iface }} # <- check interface
+    NAME={{ iface }} # <- check interface
+    IPADDR={{ ipaddr }} # <- change ip?
+    PREFIX={{ prefix }} # <- check prefix
+    GATEWAY={{ gateway }} # <- check gateway
+    ONBOOT=yes
+    DNS1={{ dns1 }} # <- probably change to sth like 192.168.0.1
+    DNS2={{ dns2 }}
+  '
+  [ubu]='
+    # * review the config and modify if required
+    # * `mv ./{{ iface }}.yaml /etc/netplan/01-{{ iface }}.yaml
+    # * `netplan apply`
+    network:
+   .  version: 2
+   .  renderer: networkd # <- for DE can be changed to NetworkManager
+   .  ethernets:
+   .    {{ iface }}: # <- check interface
+   .      dhcp4: no
+   .      addresses:
+   .      - {{ ipaddr }}/{{ prefix }} # <- check prefix. change ip?
+   .      # gateway4: {{ gateway }} # <- deprecated since ubuntu 22.04, use `routes`
+   .      routes:
+   .      - to: default
+   .        via: {{ gateway }} # <- check gateway
+   .      nameservers:
+   .        addresses:
+   .        - {{ dns1 }} # <- probably change to sth like 192.168.0.1
+   .        - {{ dns2 }}
+  '
+)
 
 {
   print_msg() {
@@ -196,16 +242,8 @@ declare -a ERRBAG
 declare -a POST_MSG
 
 # validate bools
-for c in \
-  root_chpass \
-  user_chpass \
-  user_is_system \
-  user_is_sudoer \
-  ansible_prereq \
-  gp \
-  upgrade \
-  cleanup \
-; do
+for c in "${!DEF[@]}"; do
+  [[ "${DEF[$c]}" =~ ^(true|false)$ ]] || continue
   check_bool "${CONF[$c]}" || ERRBAG+=("${c} = ${CONF[$c]}")
 done
 
@@ -447,6 +485,66 @@ declare HOSTNAME_FUNC=dummy
   }; _hostname_init; unset _hostname_init
 }
 
+declare NETCONF_FUNC=dummy
+{
+  _netconf() {
+    local default_route
+    local -A conf=(
+      [dns1]=1.1.1.1
+      [dns2]=8.8.8.8
+    )
+    local -A def=(
+      [gateway]=192.168.0.1
+      [iface]=eth0
+      [ipaddr]=192.168.0.10
+      [prefix]=24
+    )
+    local ip_range
+
+    default_route="$(ip route | grep 'default' | tail -n 1)"
+    conf[gateway]="$(grep -o '\svia\s.*' <<< "${default_route}" \
+      | sed -E 's/^\s+//' | cut -d' ' -f2)"
+    conf[iface]="$(grep -o '\sdev\s.*' <<< "${default_route}" \
+      | sed -E 's/^\s+//' | cut -d' ' -f2)"
+    ip_range="$(ip a show "${conf[iface]}" 2>/dev/null \
+      | grep '\s*inet\s' | sed -E 's/^\s+//' | cut -d' ' -f2)"
+    conf[ipaddr]="$(cut -d'/' -f1 <<< "${ip_range}/")"
+    conf[prefix]="$(cut -d'/' -f2 <<< "${ip_range}/")"
+
+    local c; for c in "${!def[@]}"; do
+      conf[$c]="${conf[$c]:-${def[$c]}}"
+    done
+
+    local filename
+    local content
+    ${CONF[is_deb]} && {
+      content="${NETCONF_TPL[ubu]}"
+      filename="${conf[iface]}.yaml"
+    }
+    ${CONF[is_rhel]} && {
+      content="${NETCONF_TPL[rhel]}"
+      filename="ifcfg-${conf[iface]}"
+    }
+
+    local c; for c in "${!conf[@]}"; do
+      content="$(sed "s/{{ $c }}/${conf[$c]}/g" <<< "${content}")"
+    done
+
+    (print_msg "${content}" | { set -x; tee "${filename}" >/dev/null; } )
+    (set -x; chmod 0644 "${filename}")
+
+    POST_MSG+=("$(print_msg "
+      Review and apply ${filename}
+    ")")
+    opt_switch_off netconf
+  }
+
+  _netconf_init() {
+    "${CONF[netconf]}" || return
+    NETCONF_FUNC=_netconf
+  }; _netconf_init; unset _netconf_init
+}
+
 declare INSTALLS_FUNC=dummy
 {
   declare -a _INSTALLS_PKGS
@@ -576,6 +674,7 @@ install_deps
 "${USER_CHPASS_FUNC}"
 
 "${HOSTNAME_FUNC}"
+"${NETCONF_FUNC}"
 
 "${INSTALLS_FUNC}"
 "${GP_INSTALL_FUNC}"
