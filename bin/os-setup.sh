@@ -4,7 +4,6 @@
 declare -A CONF=(
   #
   # USER ACTIONS
-  #
   # Change root pass
   [root_chpass]=false
   # Create a user with this login name. Leave blank to skip the
@@ -23,18 +22,18 @@ declare -A CONF=(
   [user_chpass]=false
   #
   # HOSTNAME ACTIONS
-  #
   # Machine hostname. Leave blank to skip any changes
   [hostname]=""
   # Loopback address to bind the hostname to
   [hostname_ip]="127.0.1.1"
   #
   # INSTALLS
-  #
+  # Ansible target prereqs
   [ansible_prereq]=false
+  # GP vpn
+  [gp]=false
   #
   # MAINTENANCE ACTIONS
-  #
   # Upgrade the system
   [upgrade]=false
   # Clean up the system installation and temporary junk
@@ -53,10 +52,18 @@ declare -A DEF=(
   [hostname]=""
   [hostname_ip]="127.0.1.1"
   [ansible_prereq]=false
+  [gp]=false
   [upgrade]=false
   [cleanup]=false
   [is_deb]=false
   [is_rhel]=false
+  # alternatives:
+  # * https://software.digi.com/
+  # * https://confluence.esg.wsu.edu/display/KB/Installing+and+Troubleshooting+GlobalProtect+for+Linux
+  # * https://software.anu.edu.au/itservices/it-security
+  # * https://www.hunter.cuny.edu/it/it-services/vpn
+  # * https://www.utep.edu/technologysupport/_Files/docs/NET_VPN_GlobalProtectforLinux.pdf
+  [gp_url]=https://software.digi.com/PanGPLinux-6.0.0-c18.tgz
 )
 
 for c in "${!DEF[@]}"; do
@@ -186,6 +193,7 @@ done
 
 declare -a DEPENDENCIES
 declare -a ERRBAG
+declare -a POST_MSG
 
 # validate bools
 for c in \
@@ -194,6 +202,7 @@ for c in \
   user_is_system \
   user_is_sudoer \
   ansible_prereq \
+  gp \
   upgrade \
   cleanup \
 ; do
@@ -366,8 +375,7 @@ declare USER_CHPASS_FUNC=dummy
     [[ ${#_USER_CHPASS_LOGINS[@]} -gt 0 ]] || return
     _USER_CHPASS_LOGINS=($(printf -- '%s\n' "${_USER_CHPASS_LOGINS[@]}" | sort -u))
 
-    ${CONF[is_deb]} && DEPENDENCIES+=(passwd)
-    ${CONF[is_rhel]} && DEPENDENCIES+=(passwd)
+    DEPENDENCIES+=(passwd)
     USER_CHPASS_FUNC=_user_chpass
   }; _user_chpass_init; unset _user_chpass_init
 }
@@ -464,6 +472,48 @@ declare INSTALLS_FUNC=dummy
   }; _installs_init; unset _installs_init
 }
 
+GP_INSTALL_FUNC=dummy
+{
+  _gp_install() {
+    local tmp_archive
+    local tmp_dir
+    local -a clean=(rm -f)
+    tmp_archive="$(set -x; mktemp --suffix -gp.tgz)" || return 1
+    tmp_dir="$(set -x; mktemp -d --suffix -gp)" || return 1
+    clean+=("${tmp_archive}" "${tmp_dir}"/*)
+
+    (
+      set -x
+      curl -s -L -o "${tmp_archive}" "${CONF[gp_url]}" \
+      && tar -xf "${tmp_archive}" -C "${tmp_dir}"
+    ) || { "${clean[@]}"; return 1; }
+
+    local pkg_ext=deb
+    local -a pm_cmd=(dpkg)
+    local installer_ptn
+    local installer
+    ${CONF[is_rhel]} && { pkg_ext=rpm; pm_cmd=(rpm); }
+    installer_ptn="GlobalProtect_${pkg_ext}-*.${pkg_ext}"
+
+    installer="$(find "${tmp_dir}" -name "${installer_ptn}")"
+    [[ -n "${installer}" ]] || { "${clean[@]}"; return 1; }
+
+    (set -x; "${pm_cmd[@]}" -i "${installer}" >/dev/null) || { "${clean[@]}"; return 1; }
+
+    POST_MSG+=("$(print_msg "
+      Restart the machine, login and connect to a GP portal with:
+      \`globalprotect connect -p PORTAL -u PORTAL_USER\`
+    ")")
+  }
+
+  _gp_install_init() {
+    ${CONF[gp]} || return
+    globalprotect help >/dev/null 2>/dev/null && return
+    DEPENDENCIES+=(tar curl)
+    GP_INSTALL_FUNC=_gp_install
+  }; _gp_install_init; unset _gp_install_init
+}
+
 declare UPGRADE_FUNC=dummy
 {
   _upgrade() {
@@ -528,5 +578,16 @@ install_deps
 "${HOSTNAME_FUNC}"
 
 "${INSTALLS_FUNC}"
+"${GP_INSTALL_FUNC}"
 "${UPGRADE_FUNC}"
 "${CLEANUP_FUNC}"
+
+[[ ${#POST_MSG[@]} -gt 0 ]] && {
+  print_msg "
+   .
+    POST MESSAGE
+    ============
+  "
+  printf -- '* %s\n' "${POST_MSG[@]}" \
+  | sed -e 's/^[^*]/  &/'
+}
