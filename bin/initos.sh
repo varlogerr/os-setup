@@ -161,6 +161,16 @@ declare -A NETCONF_TPL=(
     local old="${2}"
     _opt_change "${flag}" "${old}" '""'
   }
+
+  # https://gist.github.com/varlogerr/2c058af053921f1e9a0ddc39ab854577#file-sed-quote
+  sed_quote_rex() {
+    local rex="${1-$(cat)}"
+    sed -e 's/[]\/$*.^[]/\\&/g' <<< "${rex}"
+  }
+  sed_quote_replace() {
+    local replace="${1-$(cat)}"
+    sed -e 's/[\/&]/\\&/g' <<< "${replace}"
+  }
 }
 
 {
@@ -392,7 +402,7 @@ declare USER_CHPASS_FUNC=dummy
 
     for login in "${_USER_CHPASS_LOGINS[@]}"; do
       while :; do
-        passwd "${login}" && {
+        (set -x; passwd "${login}") && {
           [[ "${login}" == "${CONF[user_login]}" ]] && opt_switch_off user_chpass
           [[ "${login}" == root ]] && opt_switch_off root_chpass
           break 1
@@ -456,30 +466,43 @@ declare USER_SUDOER_FUNC=dummy
 declare HOSTNAME_FUNC=dummy
 {
   _hostname() {
-    local hostname="${CONF[hostname]}"
-    local ip="${CONF[hostname_ip]}"
+    local file=/etc/hosts
+    local new_host="${CONF[hostname]}"
+    local old_host="$(hostname 2>/dev/null)"
 
-    [[ "$(hostname)" != "${hostname}" ]] && {
-      (set -x; hostnamectl set-hostname "${hostname}") || return $?
+    [[ "${old_host}" != "${new_host}" ]] && {
+      # update system hostname
+      (set -x; hostnamectl set-hostname "${new_host}") || return $?
+      _rm_hostname_from_file "${old_host}" "${file}"
+      # in case input hostname was malformed
+      new_host="$(hostname)"
     }
 
-    local host_rex="${hostname//\./\\.}"
-    local ip_rex="${ip//\./\\.}"
-    local file=/etc/hosts
+    local ip="${CONF[hostname_ip]}"
+    local ip_rex="$(sed_quote_rex "${ip}")"
+    local new_host_rex="$(sed_quote_rex "${new_host}")"
 
-    # nothing to do if the hostname is the only entry for the ip
-    grep -qE "^\\s*${ip_rex}\\s*\\s${host_rex}\\s*(#.*)?$" "${file}" && return
+    # halt if mapping exists
+    grep -qE "^\s*${ip_rex}([^#]+)?\s+${new_host_rex}([ \t#].*)?$" "${file}" && return
 
-    local ip4_rex='([0-9]{1,3}\.){3}[0-9]{1,3}'
-
-    # remove all lines where the hostname is the only entry for ip
-    sed -i -E "/^\\s*${ip4_rex}\\s+${host_rex}\\s*(#.*)?$/d" /etc/hosts
-    # remove hostname other ip entries
-    sed -i -E "s/^(\s*${ip4_rex}[^#]*)\\s${host_rex}(\\s.*)?$/\1\3/" "${file}"
+    _rm_hostname_from_file "${new_host}" "${file}"
     # ensure new line at EOF (https://unix.stackexchange.com/a/31955)
     sed -i -e '$a\' "${file}"
-    # add a bound entry
-    (set -x; printf -- '%s %s\n' "${ip}" "${hostname}" >> "${file}")
+    # add a mapping entry
+    (set -x; printf -- '%s %s\n' "${ip}" "${new_host}" >> "${file}")
+  }
+
+  _rm_hostname_from_file() {
+    local host_rex="$(sed_quote_rex "${1}")"
+    local file="${2}"
+    (
+      set -x
+      # remove lines with single entry mappings for old host
+      # remove old host entries
+      sed -i -E \
+        -e "/^\s*([^ \t#]+)\s+${host_rex}\s*(#.*)?$/d" \
+        -e "s/^([^#]+)\s+${host_rex}([ \t#].*)?$/\1\2/" "${file}"
+    )
   }
 
   _hostname_init() {
