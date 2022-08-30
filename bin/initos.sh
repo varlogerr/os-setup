@@ -317,15 +317,13 @@ declare USER_MV_FUNC=dummy
     local from="${CONF[user_mv_from]}"
     local login="${CONF[user_login]}"
 
-    # change login name and home
-    # rename primary group
     (
       set -x
+      # change login name and home
+      # rename primary group
       usermod -l "${login}" -d "/home/${login}" -m "${from}" \
       && groupmod -n "${login}" "${from}"
-    ) && {
-      opt_empty user_mv_from "${from}"
-    }
+    ) && opt_empty user_mv_from "${from}"
   }
 
   _user_mv_init() {
