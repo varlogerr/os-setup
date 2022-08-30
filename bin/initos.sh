@@ -34,7 +34,7 @@ declare -A CONF=(
   [gp]=false
   #
   # MISC
-  # Generate sample net config to $(pwd)
+  # Generate sample static ip config to $(pwd)
   [netconf]=false
   #
   # MAINTENANCE ACTIONS
@@ -62,6 +62,7 @@ declare -A DEF=(
   [cleanup]=false
   [is_deb]=false
   [is_rhel]=false
+  [dist_id]=""
   # alternatives:
   # * https://software.digi.com/
   # * https://confluence.esg.wsu.edu/display/KB/Installing+and+Troubleshooting+GlobalProtect+for+Linux
@@ -95,7 +96,7 @@ declare -A NETCONF_TPL=(
   '
   [ubu]='
     # * review the config and modify if required
-    # * `mv ./{{ iface }}.yaml /etc/netplan/01-{{ iface }}.yaml
+    # * `mv ./{{ iface }}.yaml /etc/netplan/01-{{ iface }}.yaml`
     # * `netplan apply`
     network:
    .  version: 2
@@ -113,6 +114,24 @@ declare -A NETCONF_TPL=(
    .        addresses:
    .        - {{ dns1 }} # <- use gateway for dns1 ({{ gateway }})?
    .        - {{ dns2 }}
+  '
+  [deb]='
+    # * review the config and modify if required
+    # * `mv ./{{ iface }} /etc/network/interfaces.d/{{ iface }}`
+    # * comment or delete primary network interface entry from /etc/network/interfaces.d
+    # * `systemctl restart networking`
+    # check interface
+    auto {{ iface }}
+    # check interface
+    iface {{ iface }} inet static
+      # change ip?
+      address {{ ipaddr }}
+      # check netmask
+      netmask {{ netmask }}
+      # check gateway
+      gateway {{ gateway }}
+      # use gateway for dns1 ({{ gateway }})?
+      dns-nameservers {{ dns1 }} {{ dns2 }}
   '
 )
 
@@ -171,6 +190,16 @@ declare -A NETCONF_TPL=(
     local replace="${1-$(cat)}"
     sed -e 's/[\/&]/\\&/g' <<< "${replace}"
   }
+
+  # https://gist.github.com/kwilczynski/5d37e1cced7e76c7c9ccfdf875ba6c5b
+  cidr2netmask() {
+    local value=$(( 0xffffffff ^ ((1 << (32 - $1)) - 1) ))
+    printf -- '%s.%s.%s.%s\n' \
+      $(( (value >> 24) & 0xff )) \
+      $(( (value >> 16) & 0xff )) \
+      $(( (value >> 8) & 0xff )) \
+      $(( value & 0xff ))
+  }
 }
 
 {
@@ -183,11 +212,15 @@ declare -A NETCONF_TPL=(
   _distro_detect() {
     unset _distro_detect
 
+    local release_info
+    local id_like
     local ids
-    ids="$(cat /etc/os-release \
-      | grep -E '^(ID|ID_LIKE)=' | cut -d'=' -f2 \
-      | sed -e 's/^"//' -e 's/"$//' | tr ' ' '\n'
-    )"
+    release_info="$(cat /etc/os-release 2>/dev/null)"
+    ids="$(grep -E '^ID=' <<< "${release_info}" | cut -d'=' -f2)"
+    id_like="$(grep -E '^ID_LIKE=' <<< "${release_info}" | cut -d'=' -f2)"
+    ids+="${id_like:+$'\n'}${id_like}"
+    ids="$(sed -e 's/^"//' -e 's/"$//' <<< "${ids}" | tr ' ' '\n')"
+    CONF[dist_id]="$(head -n 1 <<< "${ids}")"
 
     local dist
     dist="$(grep -Fx -f <(printf -- '%s\n' "${!DIST_MAP[@]}") <<< "${ids}")" || return 1
@@ -248,6 +281,7 @@ declare -A NETCONF_TPL=(
 }
 
 declare -a DEPENDENCIES
+declare -a DEPENDENCIES_SERVICES
 declare -a ERRBAG
 declare -a POST_MSG
 # for debian-based system unattended installation
@@ -298,7 +332,11 @@ install_deps() {
   [[ ${#DEPENDENCIES[@]} -gt 0 ]] || return 0
 
   local -a pm_cmd
-  local -a deps=($(printf -- '%s\n' "${DEPENDENCIES[@]}" | sort -u))
+  local -a deps
+  local -a services
+  deps=($(printf -- '%s\n' "${DEPENDENCIES[@]}" | sort -u))
+  [[ ${#DEPENDENCIES_SERVICES[@]} -gt 0 ]] \
+    && services=($(printf -- '%s\n' "${DEPENDENCIES_SERVICES[@]}" | sort -u))
 
   if ${CONF[is_deb]}; then
     pm_cmd=(apt-get -q)
@@ -309,6 +347,11 @@ install_deps() {
 
   (set -x; "${pm_cmd[0]}" install -y "${deps[@]}" >/dev/null) \
     && DEPENDENCIES=()
+
+  [[ ${#services[@]} -gt 0 ]] && {
+    (set -x; systemctl enable --now "${services[@]}" >/dev/null 2>&1) \
+      && DEPENDENCIES_SERVICES=()
+  }
 }
 
 declare USER_MV_FUNC=dummy
@@ -472,9 +515,10 @@ declare HOSTNAME_FUNC=dummy
       # update system hostname
       (set -x; hostnamectl set-hostname "${new_host}") || return $?
       _rm_hostname_from_file "${old_host}" "${file}"
-      # in case input hostname was malformed
-      new_host="$(hostname)"
     }
+
+    # in case input hostname was malformed
+    new_host="$(hostname)"
 
     local ip="${CONF[hostname_ip]}"
     local ip_rex="$(sed_quote_rex "${ip}")"
@@ -507,6 +551,10 @@ declare HOSTNAME_FUNC=dummy
     local hostname="${CONF[hostname]}"
     [[ -n "${hostname}" ]] || return
     HOSTNAME_FUNC=_hostname
+    if [[ CONF[is_deb] ]]; then
+      DEPENDENCIES+=(dbus)
+      DEPENDENCIES_SERVICES+=(dbus.socket dbus.service)
+    fi
   }; _hostname_init; unset _hostname_init
 }
 
@@ -535,6 +583,7 @@ declare NETCONF_FUNC=dummy
       | grep '\s*inet\s' | sed -E 's/^\s+//' | cut -d' ' -f2)"
     conf[ipaddr]="$(cut -d'/' -f1 <<< "${ip_range}/")"
     conf[prefix]="$(cut -d'/' -f2 <<< "${ip_range}/")"
+    conf[netmask]=$(cidr2netmask "${conf[prefix]}")
 
     local c; for c in "${!def[@]}"; do
       conf[$c]="${conf[$c]:-${def[$c]}}"
@@ -543,8 +592,14 @@ declare NETCONF_FUNC=dummy
     local filename
     local content
     ${CONF[is_deb]} && {
+      # defaults to ubuntu based
       content="${NETCONF_TPL[ubu]}"
       filename="${conf[iface]}.yaml"
+      [[ ${CONF[dist_id]} == debian ]] && {
+        # for debian there is another template
+        content="${NETCONF_TPL[deb]}"
+        filename="${conf[iface]}"
+      }
     }
     ${CONF[is_rhel]} && {
       content="${NETCONF_TPL[rhel]}"

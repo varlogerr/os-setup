@@ -1,6 +1,8 @@
 # Init OS
 
-Quick initial basic configuration for RHEL and Ubuntu based distros.
+Quick initial basic configuration for RHEL and Debian / Ubuntu based distros.
+
+* [Usage](#usage)
 
 ## Usage
 
